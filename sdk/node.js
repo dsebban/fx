@@ -118,15 +118,15 @@ function validateGatewayChatUrl(value) {
   if (url.username || url.password || url.hash) {
     throw new TypeError("FX_GATEWAY_CHAT_URL must not contain credentials or a fragment");
   }
-  if (url.href === "https://ai-gateway.vercel.sh/v3/ai/language-model") return;
+  if (url.href === "https://opencode.ai/zen/go/v1/responses") return;
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "localhost";
   if (url.protocol !== "http:" || !loopback || !url.port) {
-    throw new TypeError("FX_GATEWAY_CHAT_URL must use the canonical Gateway or explicit loopback HTTP");
+    throw new TypeError("FX_GATEWAY_CHAT_URL must use the canonical OpenCode Go endpoint or explicit loopback HTTP");
   }
 }
 
 function createNativeCoreRuntime(addon, options) {
-  const apiKey = options.env?.AI_GATEWAY_API_KEY;
+  const apiKey = options.env?.OPENCODE_API_KEY || options.env?.AI_GATEWAY_API_KEY;
   const model = options.env?.FX_MODEL;
   const gatewayChatUrl = options.env?.FX_GATEWAY_CHAT_URL;
   validateGatewayChatUrl(gatewayChatUrl);

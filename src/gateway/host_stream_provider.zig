@@ -58,6 +58,13 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.Request) 
     const transport = context.transport;
     const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.api_key});
     defer alloc.free(auth);
+    const open_code_responses = gateway_client.isOpenCodeResponsesUrl(request.chat_url);
+    const owned_payload = if (open_code_responses)
+        try gateway_client.buildOpenCodeResponsesRequestBody(alloc, request.model, request.payload)
+    else
+        null;
+    defer if (owned_payload) |payload| alloc.free(payload);
+    const payload = owned_payload orelse request.payload;
 
     const Header = struct { name: []const u8, value: []const u8 };
     var headers: std.ArrayList(Header) = .empty;
@@ -65,25 +72,29 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.Request) 
     try headers.appendSlice(alloc, &.{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "authorization", .value = auth },
-        .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
-        .{ .name = "X-Title", .value = "fx" },
-        .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
-        .{ .name = "ai-language-model-specification-version", .value = "4" },
-        .{ .name = "ai-language-model-id", .value = request.model },
-        .{ .name = "ai-language-model-streaming", .value = "true" },
     });
-    if (request.team) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
-    if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
-        .{ .name = "x-session-id", .value = session_id },
-        .{ .name = "x-session-affinity", .value = session_id },
-    });
+    if (!open_code_responses) {
+        try headers.appendSlice(alloc, &.{
+            .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
+            .{ .name = "X-Title", .value = "fx" },
+            .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
+            .{ .name = "ai-language-model-specification-version", .value = "4" },
+            .{ .name = "ai-language-model-id", .value = request.model },
+            .{ .name = "ai-language-model-streaming", .value = "true" },
+        });
+        if (request.team) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
+        if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
+            .{ .name = "x-session-id", .value = session_id },
+            .{ .name = "x-session-affinity", .value = session_id },
+        });
+    }
 
     var headers_json: std.Io.Writer.Allocating = .init(alloc);
     defer headers_json.deinit();
     try std.json.Stringify.value(headers.items, .{}, &headers_json.writer);
 
     request.delivery.markPossiblySent();
-    const handle = try transport.open("POST", request.chat_url, headers_json.writer.buffered(), request.payload);
+    const handle = try transport.open("POST", request.chat_url, headers_json.writer.buffered(), payload);
     if (handle < 0) return error.HostStreamFailed;
     defer transport.close(handle);
 

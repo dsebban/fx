@@ -37,13 +37,13 @@ const Request = web_search_contract.ProviderRequest;
 const Response = web_search_contract.ProviderResponse;
 const ProgressFn = web_search_contract.ProgressFn;
 
-pub const default_model = "zai/glm-5.2";
-pub const default_chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model";
-pub const models_path = "/coding-agent/v1/models";
+pub const default_model = "muse-spark-1.2-contributor";
+pub const default_chat_url = gateway_client.open_code_responses_url;
+pub const models_path = "/v1/models";
 const credits_path = "/coding-agent/v1/credits";
 pub const retry_count: usize = 3;
 pub const chat_url_env = "FX_GATEWAY_CHAT_URL";
-pub const default_model_catalog_base_url = "https://ai-gateway.vercel.sh";
+pub const default_model_catalog_base_url = "https://opencode.ai/zen/go";
 const base_url_env = "FX_GATEWAY_BASE_URL";
 const e2e_gateway_models_url_env = "FX_E2E_GATEWAY_MODELS_URL";
 const oauth_request_timeout_ms: i64 = 15_000;
@@ -1300,7 +1300,7 @@ fn expectGatewayWorkerAdapterExecutes(backend: web_search_contract.SearchBackend
         .team = "team_123",
         .model = "provider/model",
         .retry_count = 1,
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
+        .chat_url = default_chat_url,
         .usage = &usage,
         .usage_allocator = alloc,
         .stream_ctx = @ptrCast(&fake),
@@ -1493,7 +1493,7 @@ test "cancelled gateway worker performs zero stream requests" {
         .api_key = "key",
         .model = "provider/model",
         .retry_count = 1,
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
+        .chat_url = default_chat_url,
         .stream_ctx = @ptrCast(&fake),
         .stream_fn = FakeStream.execute,
     }, .{
@@ -1602,7 +1602,7 @@ test "pre-send web search failure stays unbilled" {
         .api_key = "key",
         .model = "provider/model",
         .retry_count = 1,
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
+        .chat_url = default_chat_url,
         .usage = &usage,
         .usage_allocator = alloc,
         .stream_ctx = @ptrCast(&fake),
@@ -1631,7 +1631,7 @@ test "possibly sent web search failure marks billing incomplete" {
         .api_key = "key",
         .model = "provider/model",
         .retry_count = 1,
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
+        .chat_url = default_chat_url,
         .usage = &usage,
         .usage_allocator = alloc,
         .stream_ctx = @ptrCast(&fake),
@@ -1650,9 +1650,9 @@ test "possibly sent web search failure marks billing incomplete" {
 }
 
 test "built-in gateway defaults preserve active provider policy" {
-    try std.testing.expectEqualStrings("zai/glm-5.2", default_model);
-    try std.testing.expectEqualStrings("https://ai-gateway.vercel.sh/v3/ai/language-model", default_chat_url);
-    try std.testing.expectEqualStrings("/coding-agent/v1/models", models_path);
+    try std.testing.expectEqualStrings("muse-spark-1.2-contributor", default_model);
+    try std.testing.expectEqualStrings("https://opencode.ai/zen/go/v1/responses", default_chat_url);
+    try std.testing.expectEqualStrings("/v1/models", models_path);
     try std.testing.expectEqual(@as(usize, 3), retry_count);
     try std.testing.expectEqualStrings("FX_GATEWAY_CHAT_URL", chat_url_env);
 }
@@ -1864,15 +1864,15 @@ test "built-in credits provider ignores non-string fields" {
 test "built-in model catalog owns default and loopback target resolution" {
     const default_url = try modelCatalogUrl(std.testing.allocator, models_path, null);
     defer std.testing.allocator.free(default_url);
-    try std.testing.expectEqualStrings("https://ai-gateway.vercel.sh/coding-agent/v1/models", default_url);
+    try std.testing.expectEqualStrings("https://opencode.ai/zen/go/v1/models", default_url);
 
     const loopback_url = try modelCatalogUrl(std.testing.allocator, models_path, "http://127.0.0.1:43123");
     defer std.testing.allocator.free(loopback_url);
-    try std.testing.expectEqualStrings("http://127.0.0.1:43123/coding-agent/v1/models", loopback_url);
+    try std.testing.expectEqualStrings("http://127.0.0.1:43123/v1/models", loopback_url);
 
     const rejected_url = try modelCatalogUrl(std.testing.allocator, models_path, "https://gateway.example");
     defer std.testing.allocator.free(rejected_url);
-    try std.testing.expectEqualStrings("https://ai-gateway.vercel.sh/coding-agent/v1/models", rejected_url);
+    try std.testing.expectEqualStrings("https://opencode.ai/zen/go/v1/models", rejected_url);
 }
 
 test "built-in gateway owns the admitted web search provider policy" {
@@ -1934,7 +1934,7 @@ test "built-in gateway chat url honors loopback override before fallback" {
 }
 
 test "built-in gateway chat url ignores untrusted overrides and falls back" {
-    const fallback = "https://ai-gateway.vercel.sh/v3/ai/language-model";
+    const fallback = "https://opencode.ai/zen/go/v1/responses";
     for ([_][]const u8{
         "https://evil.example/chat",
         "http://evil.example/chat",
@@ -2383,7 +2383,8 @@ fn parseModelCatalogEntry(alloc: std.mem.Allocator, entry: std.json.Value) !?Mod
     const id_value = entry.object.get("id") orelse return null;
     if (id_value != .string) return null;
 
-    const released = if (entry.object.get("released")) |value|
+    const released_value = entry.object.get("released") orelse entry.object.get("created");
+    const released = if (released_value) |value|
         switch (value) {
             .integer => value.integer,
             else => 0,
@@ -2392,7 +2393,7 @@ fn parseModelCatalogEntry(alloc: std.mem.Allocator, entry: std.json.Value) !?Mod
         0;
 
     const tags_value = entry.object.get("tags");
-    const has_tool_use = optionalTagListContains(tags_value, "tool-use");
+    const has_tool_use = tags_value == null or optionalTagListContains(tags_value, "tool-use");
     var reasoning_efforts = try parseReasoningEfforts(alloc, entry.object.get("reasoning_options"));
     errdefer reasoning_efforts.deinit(alloc);
     const has_reasoning = optionalTagListContains(tags_value, "reasoning") or reasoning_efforts.items.len > 0;
@@ -2689,6 +2690,25 @@ test "gateway catalog accepts an explicit empty data array" {
     defer freeModelCatalog(std.testing.allocator, &catalog);
 
     try std.testing.expectEqual(@as(usize, 0), catalog.items.len);
+}
+
+test "OpenCode Go catalog accepts OpenAI model entries" {
+    const json_text =
+        \\{"object":"list","data":[
+        \\  {"id":"muse-spark-1.2-contributor","object":"model","created":1780000000,"owned_by":"opencode"},
+        \\  {"id":"other-model","object":"model","created":1770000000,"owned_by":"opencode"}
+        \\]}
+    ;
+
+    var catalog = try parseModelCatalogForView(std.testing.allocator, json_text, .full);
+    defer freeModelCatalog(std.testing.allocator, &catalog);
+
+    try std.testing.expectEqual(@as(usize, 2), catalog.items.len);
+    const muse = for (catalog.items) |entry| {
+        if (std.mem.eql(u8, entry.id, "muse-spark-1.2-contributor")) break entry;
+    } else return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(i64, 1_780_000_000), muse.released);
+    try std.testing.expect(muse.has_tool_use);
 }
 
 test "gateway catalog retains broad capability metadata" {

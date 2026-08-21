@@ -988,6 +988,205 @@ test "connection setup policy bounds retry by deadline attempts and delivery" {
     }
 }
 
+pub const open_code_responses_url = "https://opencode.ai/zen/go/v1/responses";
+
+pub fn isOpenCodeResponsesUrl(url: []const u8) bool {
+    return std.mem.eql(u8, url, open_code_responses_url);
+}
+
+pub fn buildOpenCodeResponsesRequestBody(
+    alloc: std.mem.Allocator,
+    model: []const u8,
+    gateway_payload: []const u8,
+) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, gateway_payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidGatewayRequestBody;
+    const prompt = parsed.value.object.get("prompt") orelse return error.InvalidGatewayRequestBody;
+    if (prompt != .array) return error.InvalidGatewayRequestBody;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeAll("{\"model\":");
+    try std.json.Stringify.value(model, .{}, &out.writer);
+    try out.writer.writeAll(",\"input\":");
+    try writeOpenCodeResponsesInput(alloc, &out.writer, prompt.array.items);
+    try out.writer.writeAll(",\"stream\":true");
+
+    if (parsed.value.object.get("tools")) |tools| {
+        if (tools == .array and tools.array.items.len > 0) {
+            try out.writer.writeAll(",\"tools\":[");
+            var wrote_tool = false;
+            for (tools.array.items) |tool| {
+                if (tool != .object) continue;
+                const tool_type = tool.object.get("type") orelse continue;
+                if (tool_type != .string or !std.mem.eql(u8, tool_type.string, "function")) continue;
+                const name = tool.object.get("name") orelse continue;
+                if (name != .string) continue;
+                if (wrote_tool) try out.writer.writeByte(',');
+                wrote_tool = true;
+                try out.writer.writeAll("{\"type\":\"function\",\"name\":");
+                try std.json.Stringify.value(name, .{}, &out.writer);
+                if (tool.object.get("description")) |description| {
+                    if (description == .string) {
+                        try out.writer.writeAll(",\"description\":");
+                        try std.json.Stringify.value(description, .{}, &out.writer);
+                    }
+                }
+                if (tool.object.get("inputSchema")) |schema| {
+                    try out.writer.writeAll(",\"parameters\":");
+                    try std.json.Stringify.value(schema, .{}, &out.writer);
+                }
+                try out.writer.writeAll(",\"strict\":false}");
+            }
+            try out.writer.writeByte(']');
+        }
+    }
+
+    if (parsed.value.object.get("toolChoice")) |tool_choice| {
+        if (tool_choice == .object) {
+            if (tool_choice.object.get("type")) |choice_type| {
+                if (choice_type == .string) {
+                    try out.writer.writeAll(",\"tool_choice\":");
+                    try std.json.Stringify.value(choice_type, .{}, &out.writer);
+                }
+            }
+        }
+    }
+    if (parsed.value.object.get("maxOutputTokens")) |max_output_tokens| {
+        if (max_output_tokens == .integer) {
+            try out.writer.writeAll(",\"max_output_tokens\":");
+            try std.json.Stringify.value(max_output_tokens, .{}, &out.writer);
+        }
+    }
+    try out.writer.writeByte('}');
+    return try out.toOwnedSlice();
+}
+
+fn writeOpenCodeResponsesInput(
+    alloc: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    messages: []const std.json.Value,
+) !void {
+    try writer.writeByte('[');
+    var wrote_item = false;
+    for (messages) |message| {
+        if (message != .object) continue;
+        const role_value = message.object.get("role") orelse continue;
+        if (role_value != .string) continue;
+        const role = role_value.string;
+        const content = message.object.get("content") orelse continue;
+
+        if (std.mem.eql(u8, role, "tool")) {
+            if (content != .array) continue;
+            for (content.array.items) |part| {
+                if (part != .object) continue;
+                const part_type = part.object.get("type") orelse continue;
+                if (part_type != .string or !std.mem.eql(u8, part_type.string, "tool-result")) continue;
+                const call_id = part.object.get("toolCallId") orelse continue;
+                const output = part.object.get("output") orelse continue;
+                if (call_id != .string or output != .object) continue;
+                const value = output.object.get("value") orelse continue;
+                if (value != .string) continue;
+                if (wrote_item) try writer.writeByte(',');
+                wrote_item = true;
+                try writer.writeAll("{\"type\":\"function_call_output\",\"call_id\":");
+                try std.json.Stringify.value(call_id, .{}, writer);
+                try writer.writeAll(",\"output\":");
+                try std.json.Stringify.value(value, .{}, writer);
+                try writer.writeByte('}');
+            }
+            continue;
+        }
+
+        if (content == .string) {
+            if (wrote_item) try writer.writeByte(',');
+            wrote_item = true;
+            try writer.writeAll("{\"role\":");
+            try std.json.Stringify.value(role_value, .{}, writer);
+            try writer.writeAll(",\"content\":");
+            try std.json.Stringify.value(content, .{}, writer);
+            try writer.writeByte('}');
+            continue;
+        }
+        if (content != .array) continue;
+
+        var text_parts: usize = 0;
+        for (content.array.items) |part| {
+            if (part != .object) continue;
+            const part_type = part.object.get("type") orelse continue;
+            if (part_type == .string and std.mem.eql(u8, part_type.string, "text")) text_parts += 1;
+        }
+        if (text_parts > 0) {
+            if (wrote_item) try writer.writeByte(',');
+            wrote_item = true;
+            try writer.writeAll("{\"role\":");
+            try std.json.Stringify.value(role_value, .{}, writer);
+            try writer.writeAll(",\"content\":[");
+            var wrote_part = false;
+            for (content.array.items) |part| {
+                if (part != .object) continue;
+                const part_type = part.object.get("type") orelse continue;
+                if (part_type != .string or !std.mem.eql(u8, part_type.string, "text")) continue;
+                const text_value = part.object.get("text") orelse continue;
+                if (text_value != .string) continue;
+                if (wrote_part) try writer.writeByte(',');
+                wrote_part = true;
+                try writer.writeAll(if (std.mem.eql(u8, role, "assistant"))
+                    "{\"type\":\"output_text\",\"text\":"
+                else
+                    "{\"type\":\"input_text\",\"text\":");
+                try std.json.Stringify.value(text_value, .{}, writer);
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("]}");
+        }
+
+        for (content.array.items) |part| {
+            if (part != .object) continue;
+            const part_type = part.object.get("type") orelse continue;
+            if (part_type != .string or !std.mem.eql(u8, part_type.string, "tool-call")) continue;
+            const call_id = part.object.get("toolCallId") orelse continue;
+            const name = part.object.get("toolName") orelse continue;
+            const input = part.object.get("input") orelse continue;
+            if (call_id != .string or name != .string) continue;
+            var arguments: std.Io.Writer.Allocating = .init(alloc);
+            defer arguments.deinit();
+            try std.json.Stringify.value(input, .{}, &arguments.writer);
+            if (wrote_item) try writer.writeByte(',');
+            wrote_item = true;
+            try writer.writeAll("{\"type\":\"function_call\",\"call_id\":");
+            try std.json.Stringify.value(call_id, .{}, writer);
+            try writer.writeAll(",\"name\":");
+            try std.json.Stringify.value(name, .{}, writer);
+            try writer.writeAll(",\"arguments\":");
+            try std.json.Stringify.value(arguments.written(), .{}, writer);
+            try writer.writeByte('}');
+        }
+    }
+    try writer.writeByte(']');
+}
+
+test "OpenCode Responses request uses model input and OpenAI tool fields" {
+    const payload =
+        \\{"prompt":[{"role":"system","content":"system"},{"role":"user","content":[{"type":"text","text":"hello"}]}],"tools":[{"type":"function","name":"read_file","description":"Read","inputSchema":{"type":"object"}}],"toolChoice":{"type":"auto"},"maxOutputTokens":123}
+    ;
+    const body = try buildOpenCodeResponsesRequestBody(std.testing.allocator, "muse-spark-1.2-contributor", payload);
+    defer std.testing.allocator.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("muse-spark-1.2-contributor", parsed.value.object.get("model").?.string);
+    try std.testing.expect(parsed.value.object.get("prompt") == null);
+    try std.testing.expect(parsed.value.object.get("stream").?.bool);
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.object.get("input").?.array.items.len);
+    const tool = parsed.value.object.get("tools").?.array.items[0];
+    try std.testing.expect(tool.object.get("inputSchema") == null);
+    try std.testing.expect(tool.object.get("parameters") != null);
+    try std.testing.expectEqualStrings("auto", parsed.value.object.get("tool_choice").?.string);
+    try std.testing.expectEqual(@as(i64, 123), parsed.value.object.get("max_output_tokens").?.integer);
+}
+
 pub const StreamRequest = struct {
     api_key: []const u8,
     model: []const u8,
@@ -1165,7 +1364,6 @@ fn streamGatewayCompletionCoreWithOptions(
     core_options: StreamCoreOptions,
 ) !StreamResult {
     const model = request.model;
-    const payload = request.payload;
     const retry_count = switch (request.provider_attempt_owner) {
         .agent => 1,
         .transport => request.retry_count,
@@ -1173,17 +1371,27 @@ fn streamGatewayCompletionCoreWithOptions(
     const trace_ctx = request.trace_ctx;
     const request_url = try resolveE2eGatewayUrl(e2e_gateway_chat_url_env, request.chat_url);
     const uri = try std.Uri.parse(request_url);
+    const open_code_responses = isOpenCodeResponsesUrl(request_url);
+    const owned_payload = if (open_code_responses)
+        try buildOpenCodeResponsesRequestBody(alloc, model, request.payload)
+    else
+        null;
+    defer if (owned_payload) |payload| alloc.free(payload);
+    const payload = owned_payload orelse request.payload;
 
     const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.api_key});
     defer alloc.free(auth_header);
 
     var extra_headers_buf: [9]std.http.Header = undefined;
-    const extra_headers = gatewayExtraHeaders(
-        &extra_headers_buf,
-        model,
-        request.team,
-        request.session_id,
-    );
+    const extra_headers = if (open_code_responses)
+        extra_headers_buf[0..0]
+    else
+        gatewayExtraHeaders(
+            &extra_headers_buf,
+            model,
+            request.team,
+            request.session_id,
+        );
 
     var attempt: usize = 0;
     var delivery_ambiguous = false;
@@ -2491,6 +2699,12 @@ fn parseSseTokenTotal(usage_value: std.json.Value, key: []const u8) ?u64 {
     return @intCast(total_value.integer);
 }
 
+fn openCodeUsageToken(value: ?std.json.Value) ?u64 {
+    const token_value = value orelse return null;
+    if (token_value != .integer or token_value.integer < 0) return null;
+    return @intCast(token_value.integer);
+}
+
 const SseBillingParseError = std.mem.Allocator.Error || error{InvalidSseBilling};
 
 fn parseSseBilling(
@@ -2901,7 +3115,9 @@ fn consumeSseStreamTraced(
             }
         } else if (std.mem.eql(u8, event_type, "error")) {
             try captureProviderFailureDetail(alloc, &provider_failure_detail, root);
-        } else if (std.mem.eql(u8, event_type, "text-delta")) {
+        } else if (std.mem.eql(u8, event_type, "text-delta") or
+            std.mem.eql(u8, event_type, "response.output_text.delta"))
+        {
             if (root.object.get("delta")) |delta_val| {
                 if (delta_val == .string and delta_val.string.len > 0) {
                     const retained = if (content_capture_limit) |limit|
@@ -2971,7 +3187,21 @@ fn consumeSseStreamTraced(
             } else {
                 record.state = .ended;
             }
-        } else if (std.mem.eql(u8, event_type, "tool-call")) {
+        } else if (std.mem.eql(u8, event_type, "tool-call") or
+            std.mem.eql(u8, event_type, "response.output_item.done"))
+        {
+            const open_code_tool_call = std.mem.eql(u8, event_type, "response.output_item.done");
+            const tool_root = if (open_code_tool_call) blk: {
+                const item = root.object.get("item") orelse continue;
+                if (item != .object) continue;
+                const item_type = item.object.get("type") orelse continue;
+                if (item_type != .string or !std.mem.eql(u8, item_type.string, "function_call")) continue;
+                break :blk item;
+            } else root;
+            const tool_call_id_field = if (open_code_tool_call) "call_id" else "toolCallId";
+            const tool_name_field = if (open_code_tool_call) "name" else "toolName";
+            const tool_input_field = if (open_code_tool_call) "arguments" else "input";
+
             var acc: SseToolCallAccumulator = .{
                 .id = .empty,
                 .name = .empty,
@@ -2980,9 +3210,9 @@ fn consumeSseStreamTraced(
             var acc_owned = true;
             defer if (acc_owned) acc.deinit(alloc);
 
-            acc.final_identity = finalToolIdentity(root.object.get("toolCallId"));
+            acc.final_identity = finalToolIdentity(tool_root.object.get(tool_call_id_field));
             if (acc.final_identity == .valid) {
-                try acc.id.appendSlice(alloc, root.object.get("toolCallId").?.string);
+                try acc.id.appendSlice(alloc, tool_root.object.get(tool_call_id_field).?.string);
             }
 
             var duplicate_final_id = false;
@@ -3002,7 +3232,7 @@ fn consumeSseStreamTraced(
             else
                 null;
 
-            const final_name_value = root.object.get("toolName");
+            const final_name_value = tool_root.object.get(tool_name_field);
             if (final_name_value) |name_val| {
                 if (name_val == .string) try acc.name.appendSlice(alloc, name_val.string);
             }
@@ -3028,7 +3258,7 @@ fn consumeSseStreamTraced(
                 }
             }
 
-            const final_input_state = if (root.object.get("input")) |input_value| blk: {
+            const final_input_state = if (tool_root.object.get(tool_input_field)) |input_value| blk: {
                 const integrity = try appendSupportedFinalInput(
                     alloc,
                     &acc.arguments,
@@ -3206,6 +3436,22 @@ fn consumeSseStreamTraced(
             if (acc.provider_result) |old_result| alloc.free(old_result);
             acc.provider_result = owned_result;
             acc.provider_result_state = if (preliminary) .preliminary else .final;
+        } else if (std.mem.eql(u8, event_type, "response.completed")) {
+            finish_reason_holder = if (tool_accumulators.items.len > 0) .tool_calls else .stop;
+            if (root.object.get("response")) |response_value| {
+                if (response_value == .object) {
+                    if (response_value.object.get("usage")) |usage_value| {
+                        if (usage_value == .object) {
+                            finish_usage = .{
+                                .input_tokens = openCodeUsageToken(usage_value.object.get("input_tokens")),
+                                .output_tokens = openCodeUsageToken(usage_value.object.get("output_tokens")),
+                            };
+                        }
+                    }
+                }
+            }
+            traceSseTermination(resolved_model_trace, "valid_finish", finish_reason_holder);
+            break;
         } else if (std.mem.eql(u8, event_type, "finish")) {
             const finish_event = parseSseFinishEvent(alloc, root, &provider_failure_detail) catch |err| {
                 switch (err) {
@@ -3281,6 +3527,30 @@ fn readTraceFileForTest(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     var file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{});
     defer file.close(io_mod.getIo());
     return io_mod.readFileToEnd(alloc, &file, 65536);
+}
+
+test "consumeSseStream maps OpenCode Responses text tools and completion" {
+    const payload =
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n";
+    var reader = std.Io.Reader.fixed(payload);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    const Noop = struct {
+        fn chunk(_: *anyopaque, _: []const u8) void {}
+    };
+
+    var completion = try consumeSseStream(std.testing.allocator, &reader, undefined, Noop.chunk, null, &cancel_flag);
+    defer deinitGatewayCompletion(std.testing.allocator, &completion);
+
+    try std.testing.expectEqualStrings("hello", completion.content.?);
+    try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
+    try std.testing.expectEqual(@as(?u64, 7), completion.usage.input_tokens);
+    try std.testing.expectEqual(@as(?u64, 3), completion.usage.output_tokens);
+    try std.testing.expectEqual(@as(usize, 1), completion.tool_calls.len);
+    try std.testing.expectEqualStrings("call_1", completion.tool_calls[0].id);
+    try std.testing.expectEqualStrings("read_file", completion.tool_calls[0].name);
+    try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", completion.tool_calls[0].arguments_json);
 }
 
 test "consumeSseStream preserves provider finish_reason" {
@@ -3821,12 +4091,12 @@ test "consumeSseStream keyless tracing handles oversized CRLF payloads" {
 
 test "E2E gateway URL override accepts loopback HTTP only" {
     try std.testing.expectEqualStrings(
-        "https://ai-gateway.vercel.sh/v3/ai/language-model",
-        try selectE2eGatewayUrl(null, "https://ai-gateway.vercel.sh/v3/ai/language-model"),
+        open_code_responses_url,
+        try selectE2eGatewayUrl(null, open_code_responses_url),
     );
     try std.testing.expectEqualStrings(
-        "http://127.0.0.1:43123/v3/ai/language-model",
-        try selectE2eGatewayUrl("http://127.0.0.1:43123/v3/ai/language-model", "https://ai-gateway.vercel.sh/v3/ai/language-model"),
+        "http://127.0.0.1:43123/v1/responses",
+        try selectE2eGatewayUrl("http://127.0.0.1:43123/v1/responses", open_code_responses_url),
     );
     try std.testing.expectEqualStrings(
         "http://[::1]:43123/v1/models",
@@ -3834,11 +4104,11 @@ test "E2E gateway URL override accepts loopback HTTP only" {
     );
     try std.testing.expectError(
         error.InvalidE2EGatewayUrl,
-        selectE2eGatewayUrl("https://ai-gateway.vercel.sh/v3/ai/language-model", "https://ai-gateway.vercel.sh/v3/ai/language-model"),
+        selectE2eGatewayUrl(open_code_responses_url, open_code_responses_url),
     );
     try std.testing.expectError(
         error.InvalidE2EGatewayUrl,
-        selectE2eGatewayUrl("http://127.0.0.1:43123@ai-gateway.vercel.sh/v3/ai/language-model", "https://ai-gateway.vercel.sh/v3/ai/language-model"),
+        selectE2eGatewayUrl("http://127.0.0.1:43123@opencode.ai/v1/responses", open_code_responses_url),
     );
 }
 

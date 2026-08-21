@@ -264,6 +264,10 @@ pub fn resolvePreferring(
     mode: LoadMode,
     preferred: ?Source,
 ) !Resolution {
+    if (try loadEnvCredential(alloc, "OPENCODE_API_KEY", .ai_gateway_api_key)) |credential| {
+        return .{ .credential = credential };
+    }
+
     if (preferred) |source| {
         if (source != .stored_key or !secret_store.isDisabled()) {
             const chosen = loadPreferredSource(alloc, transport, secret_store, mode, source) catch |err| blk: {
@@ -329,7 +333,7 @@ pub fn loadSource(
 ) !?Credential {
     return switch (source) {
         .vercel_oidc_token => loadEnvCredential(alloc, "VERCEL_OIDC_TOKEN", source),
-        .ai_gateway_api_key => loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source),
+        .ai_gateway_api_key => loadGatewayApiKeyCredential(alloc, source),
         .fx_login => loadFxLoginCredential(alloc, transport),
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
@@ -343,7 +347,7 @@ pub fn sourceExists(
 ) !bool {
     return switch (source) {
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
-        .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
+        .ai_gateway_api_key => nonEmptyEnvValue("OPENCODE_API_KEY") != null or nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
         .fx_login => blk: {
             const loaded = oauth_session.load(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return err,
@@ -371,6 +375,11 @@ pub fn sourceExists(
             break :blk true;
         },
     };
+}
+
+fn loadGatewayApiKeyCredential(alloc: std.mem.Allocator, source: Source) !?Credential {
+    if (try loadEnvCredential(alloc, "OPENCODE_API_KEY", source)) |credential| return credential;
+    return loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source);
 }
 
 fn loadEnvCredential(
@@ -782,6 +791,7 @@ test "source-specific credential loading bypasses generic precedence" {
     const alloc = std.testing.allocator;
     const env = try CredentialTestEnv.install(alloc, &.{
         .{ "VERCEL_OIDC_TOKEN", "oidc-token" },
+        .{ "OPENCODE_API_KEY", "opencode-key" },
         .{ "AI_GATEWAY_API_KEY", "api-key" },
     });
     defer env.deinit();
@@ -789,12 +799,12 @@ test "source-specific credential loading bypasses generic precedence" {
     const resolution = try resolve(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed);
     var startup = resolution.credential orelse return error.TestExpectedCredential;
     defer startup.deinit(alloc);
-    try std.testing.expectEqualStrings("oidc-token", startup.token);
-    try std.testing.expectEqual(Source.vercel_oidc_token, startup.source);
+    try std.testing.expectEqualStrings("opencode-key", startup.token);
+    try std.testing.expectEqual(Source.ai_gateway_api_key, startup.source);
 
     var api_key = (try loadSource(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .ai_gateway_api_key)).?;
     defer api_key.deinit(alloc);
-    try std.testing.expectEqualStrings("api-key", api_key.token);
+    try std.testing.expectEqualStrings("opencode-key", api_key.token);
     try std.testing.expectEqual(Source.ai_gateway_api_key, api_key.source);
 
     var oidc = (try loadSource(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .vercel_oidc_token)).?;

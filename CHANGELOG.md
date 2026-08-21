@@ -1,5 +1,16 @@
 # fx
 
+## 0.0.5
+
+<!-- release:start -->
+
+### New Features
+
+- **OpenCode Go models:** Fetch the model catalog from OpenCode Go and send chat through the Go Responses API, using `OPENCODE_API_KEY` when set
+- **GitHub upgrades:** `fx upgrade` installs the latest GitHub release for this fork instead of the fx.sh CDN
+
+<!-- release:end -->
+
 ## 0.0.4
 
 <!-- release:start -->

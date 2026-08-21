@@ -7,7 +7,9 @@ const Allocator = std.mem.Allocator;
 
 const recv_timeout_sec: i64 = 30;
 const latest_version_max_bytes: usize = 128;
+const github_latest_max_bytes: usize = 64 * 1024;
 const checksum_max_bytes: usize = 4096;
+const upgrade_user_agent = "fx";
 
 const Channel = update_target.Channel;
 const Target = update_target.Target;
@@ -18,7 +20,9 @@ fn setRecvTimeout(conn: *std.http.Client.Connection) void {
     std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 }
 
-pub const cdn_base = "https://releases.fx.sh";
+pub const github_repo = "dsebban/fx";
+pub const cdn_base = "https://github.com/" ++ github_repo ++ "/releases/download";
+pub const github_latest_api = "https://api.github.com/repos/" ++ github_repo ++ "/releases/latest";
 
 pub fn resolveCdnBase() []const u8 {
     if (io_mod.getenv("FX_E2E_UPGRADE_BASE_URL")) |url| {
@@ -95,21 +99,47 @@ pub fn fetchTarget(alloc: Allocator, channel: Channel, base_url: []const u8) !Ta
 fn fetchLatestVersion(alloc: Allocator, base_url: []const u8) ![]u8 {
     var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
     defer client.deinit();
-    const url = try std.fmt.allocPrint(alloc, "{s}/latest.txt", .{base_url});
-    defer alloc.free(url);
+    if (isLoopbackE2eUpgradeBase(base_url)) {
+        const url = try std.fmt.allocPrint(alloc, "{s}/latest.txt", .{base_url});
+        defer alloc.free(url);
+        return trimOwned(alloc, try fetchTextBounded(
+            &client,
+            alloc,
+            url,
+            latest_version_max_bytes,
+        ));
+    }
 
     const raw = try fetchTextBounded(
         &client,
         alloc,
-        url,
-        latest_version_max_bytes,
+        github_latest_api,
+        github_latest_max_bytes,
     );
+    defer alloc.free(raw);
+    return parseGithubLatestTag(alloc, raw) catch return error.FetchFailed;
+}
+
+fn trimOwned(alloc: Allocator, raw: []u8) ![]u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == raw.len) return raw;
-
     const duped = try alloc.dupe(u8, trimmed);
     alloc.free(raw);
     return duped;
+}
+
+fn parseGithubLatestTag(alloc: Allocator, bytes: []const u8) ![]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch
+        return error.InvalidVersion;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidVersion;
+    const tag_value = parsed.value.object.get("tag_name") orelse return error.InvalidVersion;
+    if (tag_value != .string) return error.InvalidVersion;
+    const trimmed = std.mem.trim(u8, tag_value.string, " \t\r\n");
+    if (trimmed.len == 0 or trimmed.len > update_target.max_version_bytes + 1) {
+        return error.InvalidVersion;
+    }
+    return alloc.dupe(u8, trimmed);
 }
 
 fn fetchTextBounded(
@@ -120,7 +150,13 @@ fn fetchTextBounded(
 ) ![]u8 {
     const uri = std.Uri.parse(url) catch return error.FetchFailed;
 
-    var req = client.request(.GET, uri, .{}) catch return error.FetchFailed;
+    const headers = [_]std.http.Header{
+        .{ .name = "User-Agent", .value = upgrade_user_agent },
+        .{ .name = "Accept", .value = "application/vnd.github+json" },
+    };
+    var req = client.request(.GET, uri, .{
+        .extra_headers = &headers,
+    }) catch return error.FetchFailed;
     defer req.deinit();
 
     if (req.connection) |conn| setRecvTimeout(conn);
@@ -166,7 +202,12 @@ pub fn downloadFileStreamingWithProgress(client: *std.http.Client, url: []const 
     var file_writer: std.Io.File.Writer = .initStreaming(file, io_mod.getIo(), &write_buf);
 
     const uri = std.Uri.parse(url) catch return error.DownloadFailed;
-    var req = client.request(.GET, uri, .{}) catch return error.DownloadFailed;
+    const headers = [_]std.http.Header{
+        .{ .name = "User-Agent", .value = upgrade_user_agent },
+    };
+    var req = client.request(.GET, uri, .{
+        .extra_headers = &headers,
+    }) catch return error.DownloadFailed;
     defer req.deinit();
 
     if (req.connection) |conn| setRecvTimeout(conn);
@@ -329,8 +370,29 @@ test "E2E upgrade base accepts only explicit IPv4 loopback origins" {
     try std.testing.expect(!isLoopbackE2eUpgradeBase("http://localhost:1234"));
 }
 
-test "production upgrade base uses the fx release domain" {
-    try std.testing.expectEqualStrings("https://releases.fx.sh", resolveCdnBase());
+test "production upgrade base uses GitHub release downloads" {
+    try std.testing.expectEqualStrings(
+        "https://github.com/dsebban/fx/releases/download",
+        resolveCdnBase(),
+    );
+}
+
+test "GitHub latest release JSON yields the tag name" {
+    const alloc = std.testing.allocator;
+    const tag = try parseGithubLatestTag(
+        alloc,
+        "{\"tag_name\":\"v0.0.5\",\"name\":\"0.0.5\"}",
+    );
+    defer alloc.free(tag);
+    try std.testing.expectEqualStrings("v0.0.5", tag);
+}
+
+test "GitHub latest release JSON rejects a missing tag" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidVersion,
+        parseGithubLatestTag(alloc, "{\"name\":\"0.0.5\"}"),
+    );
 }
 
 test "extractChecksumHex parses sha256sum format" {
