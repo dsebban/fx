@@ -150,6 +150,25 @@ zig build -Doptimize=ReleaseSafe
 
 Run the test suite with `zig build test`. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidelines.
 
+### OpenCode Go development builds
+
+The OpenCode Go track uses `dev/opencode-go-provider` as its release base. Keep this branch rebased onto `upstream/main` so upstream changes can be incorporated without diverging the product version. From a checkout of the development repository, configure the upstream remote once if needed with `git remote add upstream https://github.com/vercel-labs/fx.git`:
+
+```bash
+git fetch upstream
+git switch dev/opencode-go-provider
+git rebase upstream/main
+zig build -Doptimize=ReleaseSafe
+./zig-out/bin/fx
+```
+
+Keep the fx version aligned with upstream. Identify OpenCode Go snapshots with annotated tags such as `v0.0.5-opencode-go.2`; increment the suffix for each validated release snapshot:
+
+```bash
+git tag -a v0.0.5-opencode-go.3 -m "OpenCode Go build 3 based on fx 0.0.5"
+git push --force-with-lease origin dev/opencode-go-provider v0.0.5-opencode-go.3
+```
+
 ## License
 
 [Apache-2.0](LICENSE)
