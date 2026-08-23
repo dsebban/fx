@@ -203,6 +203,7 @@ fn providerTabLabel(index: usize) []const u8 {
         .openai => "OpenAI",
         .xai => "xAI",
         .zai => "Z.AI",
+        .opencode => "OpenCode",
         .others => "Others",
     };
 }
@@ -453,7 +454,7 @@ test "model menu keeps active provider visible and omits unknown metadata" {
         .active = true,
         .load_state = .ready,
         .items = &items,
-        .provider_index = 5,
+        .provider_index = @intFromEnum(model_cache_runtime.ModelProviderFilter.others),
     };
 
     const rows = menuRowCount(projection, 42, 5);
@@ -548,7 +549,7 @@ test "model menu status follows provenance and retryable failure precedence" {
     }
 }
 
-test "model menu fixed provider tabs fit a typical terminal width" {
+test "model menu fixed provider tabs keep OpenCode visible at a typical terminal width" {
     const alloc = std.testing.allocator;
     const projection: ModelMenuProjection = .{
         .active = true,
@@ -562,8 +563,9 @@ test "model menu fixed provider tabs fit a typical terminal width" {
     try std.testing.expect(std.mem.find(u8, header.items, "OpenAI") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "xAI") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Z.AI") != null);
-    try std.testing.expect(std.mem.find(u8, header.items, "Others") != null);
-    try std.testing.expect(std.mem.find(u8, header.items, "…") == null);
+    try std.testing.expect(std.mem.find(u8, header.items, "OpenCode") != null);
+    try std.testing.expect(std.mem.find(u8, header.items, "Others") == null);
+    try std.testing.expect(std.mem.find(u8, header.items, "…") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Provider ") == null);
     try std.testing.expect(display_width.visibleWidthIgnoringAnsi(header.items) <= 60);
 }

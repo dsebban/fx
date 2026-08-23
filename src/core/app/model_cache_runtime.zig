@@ -108,6 +108,7 @@ pub const ModelProviderFilter = enum {
     openai,
     xai,
     zai,
+    opencode,
     others,
 };
 
@@ -259,11 +260,13 @@ fn providerMatchesFilter(provider: []const u8, filter: ModelProviderFilter) bool
         .xai
     else if (std.ascii.eqlIgnoreCase(provider, "zai"))
         .zai
+    else if (std.ascii.eqlIgnoreCase(provider, "opencode"))
+        .opencode
     else
         null;
     return switch (filter) {
         .all => true,
-        .anthropic, .openai, .xai, .zai => known_filter == filter,
+        .anthropic, .openai, .xai, .zai, .opencode => known_filter == filter,
         .others => known_filter == null,
     };
 }
@@ -1308,6 +1311,11 @@ test "model cache warmup publishes a snapshot and filtered completion" {
 
     try std.testing.expectEqualStrings("team_123", fixture.capturedHeaderValue(test_gateway_client.vercel_ai_gateway_team_header).?);
     if (fixture.failure()) |err| return err;
+}
+
+test "opencode provider is excluded from others" {
+    try std.testing.expect(providerMatchesFilter("opencode", .opencode));
+    try std.testing.expect(!providerMatchesFilter("opencode", .others));
 }
 
 test "model menu owns resolved catalog state and filters without changing catalog order" {

@@ -1480,6 +1480,13 @@ tmuxTest(
       await session.sendKeys("Enter");
       await session.waitForText("Switched to OpenCode Go with opencode/tui-model.", TIMEOUT);
 
+      await session.sendText("/models");
+      await session.waitForPane(
+        (pane) =>
+          pane.includes("opencode/tui-model") && /Z\.AI\s+OpenCode\s+Others/.test(pane),
+        TIMEOUT,
+      );
+
       const settingsPath = join(home, ".fx", "settings.json");
       const settingsText = readFileSync(settingsPath, "utf8");
       const settings = JSON.parse(settingsText) as Record<string, unknown>;
